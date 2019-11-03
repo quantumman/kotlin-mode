@@ -326,38 +326,163 @@
           (kotlin-mode--match-interpolation limit))))))
 
 (defun kotlin-mode--prev-line ()
-  "Moves up to the nearest non-empty line"
-  (if (not (bobp))
-      (progn
-        (forward-line -1)
-        (while (and (looking-at "^[ \t]*$") (not (bobp)))
-          (forward-line -1)))))
+  "Moves up to the nearest non-empty line."
+  (beginning-of-line)
+  ;; `forward-comment' skips spaces and newlines as well.
+  (forward-comment (- (point))))
 
 (defun kotlin-mode--line-begins (pattern)
-  "Return whether the current line begins with the given pattern"
+  "Return whether the current line begins with the given PATTERN.
+
+Ignore spaces at the beginning of the line."
   (save-excursion
     (beginning-of-line)
     (looking-at (format "^[ \t]*%s" pattern))))
 
+(defun kotlin-mode--line-begins-excluding-comment (pattern)
+  "Return whether the current line begins with the given PATTERN.
+
+Ignore comments and spaces at the beginning of the line."
+  (let ((line-end-position (line-end-position)))
+    (save-excursion
+      (beginning-of-line)
+      (when (nth 4 (syntax-ppss))
+        ;; If the point is inside a comment, goto the beginning of the
+        ;; comment.
+        (goto-char (nth 8 (syntax-ppss))))
+      (forward-comment (point-max))
+      (when (< line-end-position (point))
+        (goto-char line-end-position))
+      (looking-at pattern))))
+
 (defun kotlin-mode--line-ends (pattern)
-  "Return whether the current line ends with the given pattern"
+  "Return whether the current line ends with the given PATTERN.
+
+Ignore spaces at the end of the line."
   (save-excursion
     (beginning-of-line)
     (looking-at (format ".*%s[ \t]*$" pattern))))
 
+(defun kotlin-mode--line-ends-excluding-comment (pattern)
+  "Return whether the current line ends with the given PATTERN.
+
+Ignore comments at the end of the line."
+  (let ((end-position
+         ;; last point where is neither spaces nor comment
+         (max
+          (line-beginning-position)
+          (save-excursion
+            (end-of-line)
+            (when (nth 4 (syntax-ppss))
+              ;; If the point is inside a comment, goto the beginning
+              ;; of the comment.
+              (goto-char (nth 8 (syntax-ppss))))
+            (forward-comment (- (point)))
+            (point)))))
+    (save-excursion
+      (save-restriction
+        (beginning-of-line)
+        (narrow-to-region (point) end-position)
+        (looking-at (format ".*%s$" pattern))))))
+
 (defun kotlin-mode--line-contains (pattern)
-  "Return whether the current line contains the given pattern"
+  "Return whether the current line contains the given PATTERN."
   (save-excursion
     (beginning-of-line)
     (looking-at (format ".*%s.*" pattern))))
 
-(defun kotlin-mode--line-continuation()
+(defun kotlin-mode--line-continuation ()
   "Return whether this line continues a statement in the previous line"
-  (or
-   (kotlin-mode--line-begins "\\([.=:]\\|->\\|[sg]et\\b\\)")
-   (save-excursion
-     (kotlin-mode--prev-line)
-     (kotlin-mode--line-ends "\\([=:]\\|->\\)"))))
+  (let ((case-fold-search nil))
+    (cond
+     ;; Tokens that end a statement
+     ((save-excursion
+        (kotlin-mode--prev-line)
+        (kotlin-mode--line-ends-excluding-comment
+         (rx (group
+              (or
+               ".*"
+               (seq word-start
+                    (or "return" "continue" "break")
+                    word-end))))))
+      nil)
+
+     ;; Modifiers, that cannot end a statement.
+     ((save-excursion
+        (kotlin-mode--prev-line)
+        (kotlin-mode--line-ends-excluding-comment
+         (rx (group (seq word-start
+                         (or
+                          "public" "private" "protected"
+                          "internal" "enum" "sealed" "annotation"
+                          "data" "inner" "tailrec" "operator" "inline"
+                          "infix" "external" "suspend" "override"
+                          "abstract" "final" "open" "const" "lateinit"
+                          "vararg" "noinline" "crossinline" "reified"
+                          "expect" "actual")
+                         word-end)))))
+      t)
+
+     ;; Tokens that start a statement that have lower priority than modifiers.
+     ((kotlin-mode--line-begins-excluding-comment
+       (rx (group (seq word-start
+                       (or
+                        "public" "private" "protected" "internal"
+                        "enum" "sealed" "annotation" "data" "inner"
+                        "tailrec" "operator" "inline" "infix"
+                        "external" "override" "abstract" "final"
+                        "open" "const" "lateinit" "vararg" "noinline"
+                        "crossinline" "reified" "expect" "actual"
+                        "package" "import" "interface" "val" "var"
+                        "typealias" "constructor" "companion" "init"
+                        "is" "in" "out" "for" "while" "do")
+                       word-end))))
+      nil)
+
+     ((and (kotlin-mode--line-begins-excluding-comment
+            (rx (group (seq word-start "class" word-end))))
+           (not
+            (save-excursion
+              (kotlin-mode--prev-line)
+              (kotlin-mode--line-ends-excluding-comment (rx (group "::"))))))
+      nil)
+
+     ;; Tokens that cannot end a statement
+     ((save-excursion
+        (kotlin-mode--prev-line)
+        (kotlin-mode--line-ends-excluding-comment
+         (rx (group
+              (or
+               (any "-%*./:=+&|<@")
+               "->"
+               (seq word-start
+                    "as?")
+               (seq "!is"
+                    "!in"
+                    word-end)
+               (seq word-start
+                    (or
+                     "package" "import" "class" "interface" "fun"
+                     "object" "val" "var" "typealias" "constructor"
+                     "by" "companion" "init" "where" "if" "else"
+                     "when" "try" "catch" "finally" "for" "do" "while"
+                     "throw" "as" "is" "in" "out")
+                    word-end))))))
+      t)
+
+     ;; Tokens that cannot start a statement
+     ((kotlin-mode--line-begins-excluding-comment
+       (rx (group
+            (or
+             (any ".:=<?&|")
+             "->"
+             (seq word-start "as?")
+             (seq word-start
+                  (or "get" "set" "as" "by" "where")
+                  word-end)))))
+      t)
+
+     (t nil))))
 
 (defun kotlin-mode--base-indentation ()
   "Return the indentation level of the current line based on brackets only,
@@ -516,6 +641,17 @@ fun foo() {
     bar(baz1(),
         baz2())
 }"
+  ;; Ignore comments and spaces at the end of the line.
+  ;; Example:
+  ;; fun foo() { // ignore comments here
+  ;;     bar()
+  ;; }
+  (when (nth 4 (syntax-ppss))
+    ;; If the point is inside a comment, goto the beginning of the
+    ;; comment.
+    (goto-char (nth 8 (syntax-ppss))))
+  (forward-comment (- (point)))
+
   (when (and (= (oref counter count) 0)
              (not (= (skip-syntax-backward "(") 0)))
     (kotlin-mode--add-indent counter kotlin-tab-width)
